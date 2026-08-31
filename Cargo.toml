@@ -9,6 +9,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
 
+# Only for restoring SIGPIPE to its default: see the note at the top of main.
+libc = "0.2"
+
 # The transcript rules, from the crate that owns them.
 #
 # ⚠ **Do NOT vendor these.** `human_turns` carries five facts that callers kept

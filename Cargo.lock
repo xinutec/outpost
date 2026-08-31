@@ -118,6 +118,7 @@ name = "outpost"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "reader",
  "serde",
  "serde_json",

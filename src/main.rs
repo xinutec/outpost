@@ -75,6 +75,17 @@ targets live in ~/.config/outpost/config.toml:
     window = \"<tmux session:window>\"";
 
 fn main() -> Result<()> {
+    // ⚠ **Rust ignores SIGPIPE, and `println!` then PANICS on a closed pipe.**
+    // `outpost read 50 | head` is the ordinary way to use this, and it died with
+    // a backtrace instead of stopping quietly. Restoring the default disposition
+    // is what every other command-line program does.
+    //
+    // Safe because it runs before any thread exists and only resets a signal to
+    // the behaviour the process would have had without Rust's startup code.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let all: Vec<&str> = args.iter().map(String::as_str).collect();
     // `-t` is pulled out before dispatch so every verb accepts it in the same
