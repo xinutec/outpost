@@ -82,8 +82,21 @@ impl Remote {
     /// "the session said no", so 255 is named separately.
     fn run(&self, script: &str, stdin: Option<&str>) -> Result<String> {
         let mut child = Command::new("ssh")
-            .arg("-o")
-            .arg("BatchMode=yes")
+            // ⚠ **Without these, a hung connection outlives every deadline this
+            // tool has.** `--timeout` bounds the polling LOOP and is only
+            // checked between polls, so one stalled ssh blocks forever and the
+            // wait never gives up — which is why callers kept wrapping the
+            // whole thing in a shell `timeout`, a backstop that kills the
+            // process and explains nothing. Bounding the connection here makes
+            // that wrapper unnecessary.
+            //
+            // ConnectTimeout covers never reaching the host; the keepalives
+            // cover the worse case, a session that established and then went
+            // silent, which TCP alone will sit on for hours.
+            .args(["-o", "BatchMode=yes"])
+            .args(["-o", "ConnectTimeout=10"])
+            .args(["-o", "ServerAliveInterval=15"])
+            .args(["-o", "ServerAliveCountMax=2"])
             .arg(&self.host)
             .arg(script)
             .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
