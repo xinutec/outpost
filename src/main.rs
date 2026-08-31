@@ -67,6 +67,7 @@ const USAGE: &str = "usage:
   --timeout <s>   with `wait`, how long to sit there (default 3600)
   --match <text>  with `wait`, ignore turns that do not contain it
   --task [text]   with `wait`, wait for a background task to END, not for prose
+  --idle          with `wait`, wait until it stops working, not for what it says
 
 targets live in ~/.config/outpost/config.toml:
 
@@ -416,6 +417,9 @@ fn wait(target: Option<&str>, args: &[&str]) -> Result<()> {
     let far = Remote::resolve(target)?;
     let info = far.info()?;
     let limit = timeout_of(args)?;
+    if args.contains(&"--idle") {
+        return watch_idle(&far, limit);
+    }
     if let Some(index) = args.iter().position(|a| *a == "--task") {
         // The word after --task is optional: bare --task waits for ANY task to
         // end, which is right when only one is running.
@@ -426,6 +430,44 @@ fn wait(target: Option<&str>, args: &[&str]) -> Result<()> {
         return watch_task(&far, &info.session_id, limit, want);
     }
     watch(&far, &info.session_id, limit, flag_of(args, "--match")?)
+}
+
+/// How many consecutive idle readings count as actually idle.
+///
+/// ⚠ **One is not enough.** A session between turns reports `idle` for a moment
+/// — reading the gap between two turns as "it has finished" is the same class of
+/// error as reading a quiet log as a finished build. Two readings a poll apart
+/// cost 15 seconds and remove it.
+const SETTLED: usize = 2;
+
+/// Block until the session stops working.
+///
+/// The CLI writes its own `status`, which is a first-party signal and better
+/// than anything inferrable from outside — the usual alternative is guessing
+/// from a transcript that stopped growing, which is also what a wedged session
+/// looks like. ⚠ `shell` is NOT idle: it means a command is running, and a long
+/// build sits there for half an hour.
+fn watch_idle(far: &Remote, limit: std::time::Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + limit;
+    let mut settled = 0;
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let info = far.info()?;
+        if info.status == "idle" {
+            settled += 1;
+            if settled >= SETTLED {
+                println!("idle");
+                return Ok(());
+            }
+        } else {
+            // Any non-idle reading restarts the count, so a flicker to idle in
+            // the middle of a turn cannot accumulate towards a false result.
+            settled = 0;
+        }
+        last = info.status;
+        std::thread::sleep(WAIT_EVERY);
+    }
+    bail!("still {last:?} after {}s", limit.as_secs())
 }
 
 /// Block until a background task ends, then say how it ended.
