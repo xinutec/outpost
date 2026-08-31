@@ -108,6 +108,11 @@ fn pane(args: &[&str]) -> Result<()> {
 
 /// One side of one exchange.
 struct Line {
+    /// ⚠ **The FULL ISO stamp, not the pretty one.** These get sorted, and
+    /// sorting `HH:MM` across a transcript that spans days interleaves the days
+    /// by time-of-day — which reads as a conversation in a plausible but wrong
+    /// order, and puts the wrong messages at the end. Formatting happens at the
+    /// point of printing instead.
     at: String,
     who: &'static str,
     text: String,
@@ -135,7 +140,7 @@ fn read(args: &[&str]) -> Result<()> {
             let left = line.text.chars().count() - WIDTH;
             format!("{kept}… (+{left} chars, --full for all)")
         };
-        println!("{}  {}  {text}\n", line.at, line.who);
+        println!("{}  {}  {text}\n", clock(&line.at), line.who);
     }
     if lines.len() > shown {
         println!("({} earlier, ask for more)", lines.len() - shown);
@@ -153,8 +158,13 @@ fn read(args: &[&str]) -> Result<()> {
 fn conversation(bytes: &[u8]) -> Vec<Line> {
     let mut lines: Vec<Line> = human_turns(bytes)
         .into_iter()
+        // ⚠ **Not everything on the human side was typed by a human.** The
+        // harness injects task notifications as user turns, and showing them
+        // under the person's name misreports a machine event as an instruction
+        // they gave — which is exactly the kind of thing a later reader acts on.
+        .filter(|turn| !turn.text.trim_start().starts_with("<task-notification>"))
         .map(|turn| Line {
-            at: clock(&turn.at),
+            at: turn.at,
             who: "pippijn",
             text: turn.text,
         })
@@ -172,7 +182,7 @@ fn conversation(bytes: &[u8]) -> Vec<Line> {
         }
         if let Some(text) = said(&row) {
             lines.push(Line {
-                at: clock(row["timestamp"].as_str().unwrap_or_default()),
+                at: row["timestamp"].as_str().unwrap_or_default().to_string(),
                 who: "session",
                 text,
             });

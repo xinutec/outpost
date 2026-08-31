@@ -131,7 +131,16 @@ impl Remote {
     /// ⚠ **The file is named by PID, so its name changes on every restart** and
     /// stale siblings accumulate. The newest wins rather than the only one.
     pub fn info(&self) -> Result<Info> {
-        let raw = self.run("cat ~/.claude/sessions/*.json 2>/dev/null || true", None)?;
+        // ⚠ **`cat` alone is wrong here.** These files are written without a
+        // trailing newline, so two of them concatenate into a single line that
+        // parses as nothing — and the loop below skips what it cannot parse, so
+        // the failure arrives as "no session registered" rather than as an
+        // error. Measured: a restart leaves the previous pid's file behind, so
+        // having two is the normal case, not the edge case.
+        let raw = self.run(
+            "for f in ~/.claude/sessions/*.json; do cat \"$f\"; echo; done 2>/dev/null || true",
+            None,
+        )?;
         let mut best: Option<Info> = None;
         for line in raw.lines().filter(|line| !line.trim().is_empty()) {
             let Ok(info) = serde_json::from_str::<Info>(line) else {
@@ -156,7 +165,7 @@ impl Remote {
         }
         let script = format!(
             r#"for d in ~/.claude/projects/*/; do
-                 f="$d{id}.jsonl"
+                 f="${{d}}{id}.jsonl"
                  if [ -f "$f" ]; then tail -c {TAIL} "$f"; exit 0; fi
                done
                echo "no transcript for {id}" >&2; exit 3"#
