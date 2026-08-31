@@ -1,0 +1,19 @@
+[package]
+name = "outpost"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The transcript rules, from the crate that owns them.
+#
+# ⚠ **Do NOT vendor these.** `human_turns` carries five facts that callers kept
+# re-deriving until they were centralised, after re-deriving them caused a real
+# bug — including the one this tool's send-receipt depends on: a message typed
+# to a working session is stored as a queued `attachment` and never as a `user`
+# row. A copy here would drift from the original silently. A pinned git
+# dependency can lag, but the lag is visible in Cargo.lock.
+reader = { git = "ssh://git@github.com/xinutec/memview.git" }
