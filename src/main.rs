@@ -21,6 +21,7 @@
 //! marking it as drafted. Never send unasked, and match how they actually
 //! write rather than composing fresh prose in their name.
 
+mod config;
 mod remote;
 
 use anyhow::{Context, Result, bail};
@@ -44,22 +45,48 @@ const WIDTH: usize = 700;
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 const INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
 
+/// How long `wait` will sit there, and how often it asks.
+///
+/// ⚠ **A poll costs an ssh round trip and a transcript tail**, so asking often
+/// is not free — and the thing being waited for is usually a build measured in
+/// tens of minutes. The default ceiling is generous because the alternative,
+/// returning early, reads exactly like "it never answered".
+const WAIT_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
+const WAIT_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
 const USAGE: &str = "usage:
   outpost status            what the session says it is doing, and the windows
   outpost read [n]          the last n exchanges, both sides   (default 12)
   outpost pane [n]          the window itself, with n lines of scrollback
-  outpost send <text>       type it and press Enter, as Pippijn; `-` reads stdin
+  outpost send <text>       type it and press Enter, as them; `-` reads stdin
+  outpost wait              block until it says something new, then print it
 
-  --full   with `read`, do not shorten long messages";
+  -t <name>       which target, from the config file
+  --full          with `read`, do not shorten long messages
+  --wait          with `send`, wait for the reply and print it
+  --timeout <s>   with `wait`, how long to sit there (default 3600)
+
+targets live in ~/.config/outpost/config.toml:
+
+    default = \"dev\"
+
+    [targets.dev]
+    host = \"<ssh destination>\"
+    window = \"<tmux session:window>\"";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let rest: Vec<&str> = args.iter().map(String::as_str).collect();
+    let all: Vec<&str> = args.iter().map(String::as_str).collect();
+    // `-t` is pulled out before dispatch so every verb accepts it in the same
+    // place, and so a verb's own argument parsing never has to know about it.
+    let (target, rest) = take_target(&all)?;
+    let target = target.as_deref();
     match rest.split_first() {
-        None | Some((&"status", [])) => status(),
-        Some((&"read", tail)) => read(tail),
-        Some((&"pane", tail)) => pane(tail),
-        Some((&"send", tail)) => send(tail),
+        None | Some((&"status", [])) => status(target),
+        Some((&"read", tail)) => read(target, tail),
+        Some((&"pane", tail)) => pane(target, tail),
+        Some((&"send", tail)) => send(target, tail),
+        Some((&"wait", tail)) => wait(target, tail),
         Some((&("-h" | "--help" | "help"), _)) => {
             println!("{USAGE}");
             Ok(())
@@ -68,8 +95,30 @@ fn main() -> Result<()> {
     }
 }
 
-fn status() -> Result<()> {
-    let far = Remote::from_env()?;
+/// Lift `-t <name>` (or `--target <name>`) out of the arguments.
+fn take_target<'a>(args: &[&'a str]) -> Result<(Option<String>, Vec<&'a str>)> {
+    let mut target = None;
+    let mut rest = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "-t" | "--target" => {
+                // ⚠ A missing value would otherwise swallow the verb: `-t read`
+                // would silently look for a target called "read".
+                let name = it.next().context("-t needs a target name")?;
+                if name.starts_with('-') {
+                    bail!("-t needs a target name, got {name:?}");
+                }
+                target = Some((*name).to_string());
+            }
+            other => rest.push(other),
+        }
+    }
+    Ok((target, rest))
+}
+
+fn status(target: Option<&str>) -> Result<()> {
+    let far = Remote::resolve(target)?;
     let info = far.info()?;
     let bridged = match &info.bridge {
         Some(_) => "bridged",
@@ -97,12 +146,12 @@ fn status() -> Result<()> {
     Ok(())
 }
 
-fn pane(args: &[&str]) -> Result<()> {
+fn pane(target: Option<&str>, args: &[&str]) -> Result<()> {
     let back: usize = match args.first() {
         Some(n) => n.parse().context("that is not a number of lines")?,
         None => 0,
     };
-    print!("{}", Remote::from_env()?.pane(back)?);
+    print!("{}", Remote::resolve(target)?.pane(back)?);
     Ok(())
 }
 
@@ -118,7 +167,7 @@ struct Line {
     text: String,
 }
 
-fn read(args: &[&str]) -> Result<()> {
+fn read(target: Option<&str>, args: &[&str]) -> Result<()> {
     let full = args.contains(&"--full");
     let want: usize = args
         .iter()
@@ -126,7 +175,7 @@ fn read(args: &[&str]) -> Result<()> {
         .map_or(Ok(12), |n| n.parse())
         .context("that is not a number of messages")?;
 
-    let far = Remote::from_env()?;
+    let far = Remote::resolve(target)?;
     let info = far.info()?;
     let bytes = far.transcript(&info.session_id)?;
     let lines = conversation(&bytes);
@@ -221,7 +270,7 @@ fn clock(stamp: &str) -> String {
         .to_string()
 }
 
-fn send(args: &[&str]) -> Result<()> {
+fn send(target: Option<&str>, args: &[&str]) -> Result<()> {
     if args.is_empty() {
         bail!("usage: outpost send <text>");
     }
@@ -230,7 +279,20 @@ fn send(args: &[&str]) -> Result<()> {
         std::io::stdin().read_to_string(&mut buf)?;
         buf
     } else {
-        args.join(" ")
+        // ⚠ **Flags are not message text.** Without this, `send "x" --wait`
+        // types the word "--wait" into the composer and sends it.
+        let mut words = Vec::new();
+        let mut it = args.iter();
+        while let Some(arg) = it.next() {
+            match *arg {
+                "--wait" => {}
+                "--timeout" => {
+                    it.next();
+                }
+                other => words.push(other),
+            }
+        }
+        words.join(" ")
     };
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -247,7 +309,7 @@ fn send(args: &[&str]) -> Result<()> {
         );
     }
 
-    let far = Remote::from_env()?;
+    let far = Remote::resolve(target)?;
     let info = far.info()?;
     let before: HashSet<String> = human_turns(&far.transcript(&info.session_id)?)
         .into_iter()
@@ -284,6 +346,9 @@ fn send(args: &[&str]) -> Result<()> {
                 "read"
             };
             println!("sent, {how} ({} chars)", text.chars().count());
+            if args.contains(&"--wait") {
+                return watch(&far, &info.session_id, timeout_of(args)?);
+            }
             return Ok(());
         }
     }
@@ -292,5 +357,83 @@ fn send(args: &[&str]) -> Result<()> {
          it may be mid-turn with a slow write, or it may have stopped reading input.\n\
          `outpost pane` to see which — do NOT send it again blind.",
         PATIENCE.as_secs()
+    )
+}
+
+/// Every assistant turn, with the uuid that tells a NEW one from a repeat.
+///
+/// ⚠ **Dedupe by uuid and keep the first.** The CLI rewrites earlier stretches
+/// of the file back into it, so a linear read sees the same turn twice — and a
+/// waiter that keyed on text or position would announce an old message as the
+/// answer it was waiting for.
+fn spoken(bytes: &[u8]) -> Vec<(String, String, String)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for row in bytes.split(|b| *b == b'\n') {
+        let Ok(row) = serde_json::from_slice::<serde_json::Value>(row) else {
+            continue;
+        };
+        let uuid = row["uuid"].as_str().unwrap_or_default().to_string();
+        if uuid.is_empty() || !seen.insert(uuid.clone()) {
+            continue;
+        }
+        if let Some(text) = said(&row) {
+            let at = row["timestamp"].as_str().unwrap_or_default().to_string();
+            out.push((uuid, at, text));
+        }
+    }
+    out
+}
+
+fn wait(target: Option<&str>, args: &[&str]) -> Result<()> {
+    let far = Remote::resolve(target)?;
+    let info = far.info()?;
+    let limit = timeout_of(args)?;
+    watch(&far, &info.session_id, limit)
+}
+
+/// How long to wait, from `--timeout <seconds>`.
+fn timeout_of(args: &[&str]) -> Result<std::time::Duration> {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if *arg == "--timeout" {
+            let value = it.next().context("--timeout needs a number of seconds")?;
+            let seconds: u64 = value.parse().context("--timeout wants seconds")?;
+            return Ok(std::time::Duration::from_secs(seconds));
+        }
+    }
+    Ok(WAIT_FOR)
+}
+
+/// Block until the session says something it has not said before, then print it.
+///
+/// This exists because the alternative was a shell loop that fingerprinted the
+/// last line and compared strings — which is both awkward to write each time and
+/// wrong in a way that is easy to miss, since an identical message sent twice is
+/// a real thing a session does.
+fn watch(far: &Remote, id: &str, limit: std::time::Duration) -> Result<()> {
+    let before: HashSet<String> = spoken(&far.transcript(id)?)
+        .into_iter()
+        .map(|(uuid, _, _)| uuid)
+        .collect();
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(WAIT_EVERY);
+        let fresh: Vec<(String, String, String)> = spoken(&far.transcript(id)?)
+            .into_iter()
+            .filter(|(uuid, _, _)| !before.contains(uuid))
+            .collect();
+        if !fresh.is_empty() {
+            for (_, at, text) in fresh {
+                println!("{}  {text}\n", clock(&at));
+            }
+            return Ok(());
+        }
+    }
+    // Not an error in the sense of something being broken — but it must not
+    // exit 0, or a script cannot tell "it answered" from "it did not".
+    bail!(
+        "nothing new in {}s. `outpost pane` to see whether it is still working.",
+        limit.as_secs()
     )
 }

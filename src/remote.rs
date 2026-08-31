@@ -68,16 +68,9 @@ pub struct Info {
 }
 
 impl Remote {
-    /// From `OUTPOST_HOST` and `OUTPOST_WINDOW`.
-    pub fn from_env() -> Result<Self> {
-        let host = std::env::var("OUTPOST_HOST")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .context("set OUTPOST_HOST to an ssh destination")?;
-        let target = std::env::var("OUTPOST_WINDOW")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .context("set OUTPOST_WINDOW to a tmux session:window")?;
+    /// From the config file, or the environment. See [`crate::config`].
+    pub fn resolve(named: Option<&str>) -> Result<Self> {
+        let (host, target) = crate::config::resolve(named)?;
         Ok(Self { host, target })
     }
 
