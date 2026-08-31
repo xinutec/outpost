@@ -65,6 +65,8 @@ const USAGE: &str = "usage:
   --full          with `read`, do not shorten long messages
   --wait          with `send`, wait for the reply and print it
   --timeout <s>   with `wait`, how long to sit there (default 3600)
+  --match <text>  with `wait`, ignore turns that do not contain it
+  --task [text]   with `wait`, wait for a background task to END, not for prose
 
 targets live in ~/.config/outpost/config.toml:
 
@@ -297,7 +299,7 @@ fn send(target: Option<&str>, args: &[&str]) -> Result<()> {
         while let Some(arg) = it.next() {
             match *arg {
                 "--wait" => {}
-                "--timeout" => {
+                "--timeout" | "--match" => {
                     it.next();
                 }
                 other => words.push(other),
@@ -358,7 +360,12 @@ fn send(target: Option<&str>, args: &[&str]) -> Result<()> {
             };
             println!("sent, {how} ({} chars)", text.chars().count());
             if args.contains(&"--wait") {
-                return watch(&far, &info.session_id, timeout_of(args)?);
+                return watch(
+                    &far,
+                    &info.session_id,
+                    timeout_of(args)?,
+                    flag_of(args, "--match")?,
+                );
             }
             return Ok(());
         }
@@ -400,7 +407,67 @@ fn wait(target: Option<&str>, args: &[&str]) -> Result<()> {
     let far = Remote::resolve(target)?;
     let info = far.info()?;
     let limit = timeout_of(args)?;
-    watch(&far, &info.session_id, limit)
+    if let Some(index) = args.iter().position(|a| *a == "--task") {
+        // The word after --task is optional: bare --task waits for ANY task to
+        // end, which is right when only one is running.
+        let want = args
+            .get(index + 1)
+            .filter(|next| !next.starts_with("--"))
+            .map(|next| (*next).to_string());
+        return watch_task(&far, &info.session_id, limit, want);
+    }
+    watch(&far, &info.session_id, limit, flag_of(args, "--match")?)
+}
+
+/// Block until a background task ends, then say how it ended.
+fn watch_task(
+    far: &Remote,
+    id: &str,
+    limit: std::time::Duration,
+    want: Option<String>,
+) -> Result<()> {
+    let matches = |summary: &str| {
+        want.as_deref()
+            .is_none_or(|w| summary.to_lowercase().contains(&w.to_lowercase()))
+    };
+    let before: HashSet<String> = endings(&far.transcript(id)?)
+        .into_iter()
+        .map(|(uuid, _, _, _)| uuid)
+        .collect();
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(WAIT_EVERY);
+        let ended = endings(&far.transcript(id)?)
+            .into_iter()
+            .find(|(uuid, _, _, summary)| !before.contains(uuid) && matches(summary));
+        if let Some((_, at, status, summary)) = ended {
+            println!("{}  {status}  {summary}", clock(&at));
+            // ⚠ **A task that was killed must not exit 0.** That is the whole
+            // point of reading the status rather than the session's account of
+            // it: twice today a build was killed and reported as producing no
+            // output, which reads like a build that did nothing wrong.
+            if status != "completed" {
+                bail!("the task did not complete — it was {status}");
+            }
+            return Ok(());
+        }
+    }
+    bail!(
+        "no background task ended in {}s. `outpost read` to see what it is doing.",
+        limit.as_secs()
+    )
+}
+
+/// The value of a `--flag value` pair, if it is there.
+fn flag_of(args: &[&str], flag: &str) -> Result<Option<String>> {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if *arg == flag {
+            let value = it.next().with_context(|| format!("{flag} needs a value"))?;
+            return Ok(Some((*value).to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// How long to wait, from `--timeout <seconds>`.
@@ -422,7 +489,12 @@ fn timeout_of(args: &[&str]) -> Result<std::time::Duration> {
 /// last line and compared strings — which is both awkward to write each time and
 /// wrong in a way that is easy to miss, since an identical message sent twice is
 /// a real thing a session does.
-fn watch(far: &Remote, id: &str, limit: std::time::Duration) -> Result<()> {
+fn watch(
+    far: &Remote,
+    id: &str,
+    limit: std::time::Duration,
+    needle: Option<String>,
+) -> Result<()> {
     let before: HashSet<String> = spoken(&far.transcript(id)?)
         .into_iter()
         .map(|(uuid, _, _)| uuid)
@@ -430,9 +502,20 @@ fn watch(far: &Remote, id: &str, limit: std::time::Duration) -> Result<()> {
     let deadline = std::time::Instant::now() + limit;
     while std::time::Instant::now() < deadline {
         std::thread::sleep(WAIT_EVERY);
+        // ⚠ **Waiting for "anything new" is the wrong thing whenever somebody
+        // else is also talking to the session.** Measured: a wait for a build
+        // result returned on an unrelated answer 22 minutes in, because a
+        // question had been asked in the meantime and the session replied to
+        // that first. `--match` is what makes the wait about the thing wanted
+        // rather than about the next thing to happen.
         let fresh: Vec<(String, String, String)> = spoken(&far.transcript(id)?)
             .into_iter()
             .filter(|(uuid, _, _)| !before.contains(uuid))
+            .filter(|(_, _, text)| {
+                needle
+                    .as_deref()
+                    .is_none_or(|want| text.to_lowercase().contains(&want.to_lowercase()))
+            })
             .collect();
         if !fresh.is_empty() {
             for (_, at, text) in fresh {
@@ -443,8 +526,113 @@ fn watch(far: &Remote, id: &str, limit: std::time::Duration) -> Result<()> {
     }
     // Not an error in the sense of something being broken — but it must not
     // exit 0, or a script cannot tell "it answered" from "it did not".
-    bail!(
-        "nothing new in {}s. `outpost pane` to see whether it is still working.",
-        limit.as_secs()
-    )
+    match needle {
+        Some(want) => bail!(
+            "nothing matching {want:?} in {}s. `outpost read` to see what it did say.",
+            limit.as_secs()
+        ),
+        None => bail!(
+            "nothing new in {}s. `outpost pane` to see whether it is still working.",
+            limit.as_secs()
+        ),
+    }
+}
+
+/// Background-task endings recorded in the transcript, newest last.
+///
+/// ⚠ **This is the only EXACT signal that a long job finished.** Waiting on what
+/// the session says is waiting on prose: it reports in whatever words it
+/// chooses, it may answer an unrelated question first, and — measured twice —
+/// when its own task is killed it can report "no output" without knowing why.
+/// The harness writes these rows itself, with a status that distinguishes
+/// `completed` from `killed`, which is precisely the distinction that cost two
+/// builds today.
+fn endings(bytes: &[u8]) -> Vec<(String, String, String, String)> {
+    human_turns(bytes)
+        .into_iter()
+        .filter(|turn| turn.text.contains("<task-notification>"))
+        .filter_map(|turn| {
+            let field = |tag: &str| -> String {
+                let open = format!("<{tag}>");
+                let close = format!("</{tag}>");
+                turn.text
+                    .split_once(&open)
+                    .and_then(|(_, rest)| rest.split_once(&close))
+                    .map(|(value, _)| value.trim().to_string())
+                    .unwrap_or_default()
+            };
+            let status = field("status");
+            // A notification with no status is a shape this does not understand;
+            // treating it as an ending would be inventing one.
+            (!status.is_empty()).then(|| (turn.uuid, turn.at, status, field("summary")))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A user row as the CLI writes one, wrapping whatever text is given.
+    fn row(uuid: &str, text: &str) -> String {
+        serde_json::json!({
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": "2026-08-31T14:31:17.038Z",
+            "message": { "role": "user", "content": text },
+        })
+        .to_string()
+    }
+
+    /// ⚠ **Verbatim from a real transcript**, not invented. A probe against the
+    /// live session could only ever show "nothing matched", which is the same
+    /// output a parser that never matches anything would give — so the shape
+    /// this reads has to be pinned by something that fails loudly when it moves.
+    const KILLED: &str = "<task-notification>\n\
+        <task-id>b2jj7il5o</task-id>\n\
+        <tool-use-id>toolu_014JBQeyBit3vaXrYRKhseUS</tool-use-id>\n\
+        <output-file>/tmp/claude-1000/tasks/b2jj7il5o.output</output-file>\n\
+        <status>killed</status>\n\
+        <summary>Background command \"Build all targets after reboot\" was stopped</summary>\n\
+        </task-notification>";
+
+    const DONE: &str = "<task-notification>\n\
+        <task-id>b3jbxr5cm</task-id>\n\
+        <status>completed</status>\n\
+        <summary>Background command \"Retry building all targets\" completed (exit code 0)</summary>\n\
+        </task-notification>";
+
+    #[test]
+    fn reads_status_and_summary_out_of_a_notification() {
+        let bytes = format!("{}\n{}\n", row("a", KILLED), row("b", DONE));
+        let found = endings(bytes.as_bytes());
+        assert_eq!(found.len(), 2, "both notifications should be seen");
+        assert_eq!(found[0].2, "killed");
+        assert!(found[0].3.contains("Build all targets after reboot"));
+        assert_eq!(found[1].2, "completed");
+    }
+
+    /// The distinction the whole verb exists for: a killed task and a completed
+    /// one are both "the task ended", and only one of them is success.
+    #[test]
+    fn killed_is_not_completed() {
+        let bytes = format!("{}\n", row("a", KILLED));
+        assert_ne!(endings(bytes.as_bytes())[0].2, "completed");
+    }
+
+    /// Ordinary conversation must not look like a task ending.
+    #[test]
+    fn plain_text_is_not_an_ending() {
+        let bytes = format!("{}\n", row("a", "we restarted. build //... again"));
+        assert!(endings(bytes.as_bytes()).is_empty());
+    }
+
+    /// A notification whose shape this does not understand is skipped rather
+    /// than reported as an ending with an empty status.
+    #[test]
+    fn a_notification_without_a_status_is_not_an_ending() {
+        let text = "<task-notification>\n<task-id>x</task-id>\n</task-notification>";
+        let bytes = format!("{}\n", row("a", text));
+        assert!(endings(bytes.as_bytes()).is_empty());
+    }
 }
