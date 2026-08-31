@@ -334,7 +334,16 @@ fn send(target: Option<&str>, args: &[&str]) -> Result<()> {
     // the composer was not focused, this is the last moment at which nothing has
     // been sent yet.
     let composer = far.pane(0)?;
-    if !composer.contains(&text) {
+    // ⚠ **A composer WRAPS.** Anything past the pane width comes back with a
+    // newline and the continuation's indentation inserted mid-sentence, so a
+    // literal `contains` fails on exactly the long messages most worth checking
+    // — and the failure looks like "the keystrokes went somewhere else", which
+    // is the one thing this check exists to catch. Comparing with all
+    // whitespace removed is indifferent to where the wrap landed.
+    let squeeze = |value: &str| -> String {
+        value.chars().filter(|c| !c.is_whitespace()).collect()
+    };
+    if !squeeze(&composer).contains(&squeeze(&text)) {
         bail!(
             "typed it, but it is not on screen — not pressing Enter.\n\
              the window may not be the composer. `outpost pane` to look."
