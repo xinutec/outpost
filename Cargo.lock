@@ -164,7 +164,7 @@ dependencies = [
 [[package]]
 name = "reader"
 version = "0.1.0"
-source = "git+ssh://git@github.com/xinutec/memview.git#002c8fbabbd7b852a43379a0a7c3a8b0067e6afc"
+source = "git+https://github.com/xinutec/memview.git#b5c9acbdceabde7d24a321e5fff431091af6bf62"
 dependencies = [
  "anyhow",
  "base64",
