@@ -1,0 +1,96 @@
+{
+  "checks": [
+    {
+      "argv": [
+        "nix",
+        "develop",
+        "--no-warn-dirty",
+        "--command",
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "cwd": ".",
+      "env": {},
+      "name": "formatting",
+      "timeout_s": 120
+    },
+    {
+      "argv": [
+        "nix",
+        "develop",
+        "--no-warn-dirty",
+        "--command",
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": ".",
+      "env": {
+        "CARGO_TARGET_DIR": "/Users/pippijn/.cache/cargo/clippy-target"
+      },
+      "name": "clippy",
+      "timeout_s": 900
+    },
+    {
+      "argv": [
+        "nix",
+        "develop",
+        "--no-warn-dirty",
+        "--command",
+        "cargo",
+        "test"
+      ],
+      "cwd": ".",
+      "env": {},
+      "name": "tests",
+      "timeout_s": 900
+    },
+    {
+      "argv": [
+        "nix",
+        "build",
+        "--no-warn-dirty",
+        "--no-link",
+        ".#default"
+      ],
+      "cwd": ".",
+      "env": {},
+      "name": "the binary builds (what home-manager installs)",
+      "timeout_s": 1800
+    },
+    {
+      "argv": [
+        "nix",
+        "run",
+        "git+file:../dev-lint?ref=HEAD",
+        "--",
+        "."
+      ],
+      "cwd": ".",
+      "env": {},
+      "name": "dev-lint",
+      "timeout_s": 900
+    },
+    {
+      "argv": [
+        "nix",
+        "run",
+        "../dev-lint#gate",
+        "--",
+        "--check-table",
+        "gate.dhall",
+        "gate.json"
+      ],
+      "cwd": ".",
+      "env": {},
+      "name": "the table matches its Dhall",
+      "timeout_s": 300
+    }
+  ],
+  "name": "outpost"
+}

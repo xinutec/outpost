@@ -74,8 +74,12 @@ pub fn resolve(named: Option<&str>) -> Result<(String, String)> {
         return Ok((target.host.clone(), target.window.clone()));
     }
 
-    let host = std::env::var("OUTPOST_HOST").ok().filter(|v| !v.trim().is_empty());
-    let window = std::env::var("OUTPOST_WINDOW").ok().filter(|v| !v.trim().is_empty());
+    let host = std::env::var("OUTPOST_HOST")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let window = std::env::var("OUTPOST_WINDOW")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     match (host, window) {
         (Some(host), Some(window)) => Ok((host, window)),
         _ => bail!(

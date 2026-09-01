@@ -99,7 +99,11 @@ impl Remote {
             .args(["-o", "ServerAliveCountMax=2"])
             .arg(&self.host)
             .arg(script)
-            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -129,7 +133,10 @@ impl Remote {
     /// back, and could only ever return the visible window — anything that
     /// scrolled past between two polls was gone.
     pub fn pane(&self, back: usize) -> Result<String> {
-        self.run(&format!("tmux capture-pane -p -S -{back} -t {} 2>&1", self.target), None)
+        self.run(
+            &format!("tmux capture-pane -p -S -{back} -t {} 2>&1", self.target),
+            None,
+        )
     }
 
     /// What the CLI says about itself.
@@ -152,7 +159,10 @@ impl Remote {
             let Ok(info) = serde_json::from_str::<Info>(line) else {
                 continue;
             };
-            if best.as_ref().is_none_or(|old| info.updated_at > old.updated_at) {
+            if best
+                .as_ref()
+                .is_none_or(|old| info.updated_at > old.updated_at)
+            {
                 best = Some(info);
             }
         }
@@ -188,7 +198,10 @@ impl Remote {
     /// remote shell quotes it once, in `"$(cat)"`, where nothing this side wrote
     /// can change how it parses.
     pub fn type_text(&self, text: &str) -> Result<()> {
-        self.run(&format!(r#"tmux send-keys -t {} -l -- "$(cat)""#, self.target), Some(text))?;
+        self.run(
+            &format!(r#"tmux send-keys -t {} -l -- "$(cat)""#, self.target),
+            Some(text),
+        )?;
         Ok(())
     }
 
