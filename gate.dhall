@@ -44,6 +44,7 @@ in  { name = "outpost"
           env = G.clippyTarget
         , timeout_s = 900
         }
+      , G.cargoDoc
       , {-  ⚠ **Everything worth testing here is in the library, and that is
               what the tests link.** The binary is argument parsing, printing
               and a poll loop; the rules that decide what a machine's answer
