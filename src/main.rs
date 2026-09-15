@@ -24,7 +24,7 @@
 use anyhow::{Context, Result, bail};
 use outpost::args::{flag_of, take_target, timeout_of};
 use outpost::remote::Remote;
-use outpost::transcript::{Turn, clock, conversation, endings, spoken};
+use outpost::transcript::{Turn, clock, conversation, day, endings, spoken};
 use reader::transcript::human_turns;
 use std::collections::HashSet;
 use std::io::Read;
@@ -158,7 +158,20 @@ fn read(target: Option<&str>, args: &[&str]) -> Result<()> {
     let lines = conversation(&bytes);
 
     let shown = want.min(lines.len());
+    // ⚠ **`14:31` alone does not say which day.** Inside one sitting that is
+    // fine; across a gap it is not, and the failure is silent — a conversation
+    // last touched a fortnight ago reads exactly like one from this morning.
+    // The header goes in wherever the day changes, and always before the first
+    // line shown, because a reader starting mid-transcript has nothing earlier
+    // to have inferred it from.
+    let mut dated: Option<&str> = None;
     for line in &lines[lines.len() - shown..] {
+        if let Some(today) = day(&line.at)
+            && dated != Some(today)
+        {
+            println!("{today}");
+            dated = Some(today);
+        }
         let text = if full || line.text.chars().count() <= WIDTH {
             line.text.clone()
         } else {

@@ -108,6 +108,33 @@ fn said(row: &serde_json::Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// The `2026-08-31` of a stamp, or `None` if it is not that shape.
+///
+/// ⚠ **A time alone cannot say which day it is from.** `clock` prints `14:31`,
+/// which is unambiguous inside one day and silently wrong across a gap — a
+/// transcript that has not been read for a fortnight looks exactly like one from
+/// this morning. This is what lets a reader mark where the day changed. The
+/// answer is the stamp's OWN date, in UTC as it was written: comparing against
+/// a local "today" would disagree with the printed time by a day for every
+/// message between midnight UTC and midnight local, which is the season Pippijn
+/// spends on BST.
+///
+/// Validated to the same standard as `clock`, and for the same reason: the
+/// first ten characters of an unrecognised string are a plausible-looking date.
+pub fn day(stamp: &str) -> Option<&str> {
+    let date = stamp.split_once('T').map(|(date, _)| date)?;
+    let b = date.as_bytes();
+    let shaped = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4]
+            .iter()
+            .chain(&b[5..7])
+            .chain(&b[8..])
+            .all(u8::is_ascii_digit);
+    shaped.then_some(date)
+}
+
 /// `2026-08-31T14:31:24.717Z` as `14:31`.
 ///
 /// ⚠ **Anything that is not that shape comes back whole.** Taking the first

@@ -5,7 +5,7 @@
 //! parser that never matches anything gives — so the shape being read has to be
 //! held down by something that fails loudly when it moves.
 
-use outpost::transcript::{clock, conversation, endings, spoken};
+use outpost::transcript::{clock, conversation, day, endings, spoken};
 
 /// A user row as the CLI writes one, wrapping whatever text is given.
 fn user(uuid: &str, at: &str, text: &str) -> String {
@@ -204,4 +204,44 @@ fn an_unparseable_stamp_is_returned_untouched() {
 fn five_characters_after_a_t_are_not_a_clock_unless_they_are_one() {
     assert_eq!(clock("2026-08-31Tnot-a-time"), "2026-08-31Tnot-a-time");
     assert_eq!(clock(""), "");
+}
+
+#[test]
+fn a_stamp_yields_its_date() {
+    assert_eq!(day("2026-08-31T14:31:24.717Z"), Some("2026-08-31"));
+}
+
+/// ⚠ **The first ten characters of an unrecognised string are a
+/// plausible-looking date.** Same trap as `clock` returning `-here`: a header
+/// that is not a date still reads as one.
+#[test]
+fn a_stamp_that_is_not_a_date_yields_nothing() {
+    assert_eq!(day("no-T-here"), None);
+    assert_eq!(day(""), None);
+    assert_eq!(day("not-a-dateTdoes-not-matter"), None);
+    assert_eq!(
+        day("2026-08-3T14:31:24.717Z"),
+        None,
+        "nine characters is not a date"
+    );
+}
+
+/// The date is the stamp's own, in UTC as written. Deriving it from a local
+/// "today" would disagree with the time printed beside it by a whole day for
+/// every message between midnight UTC and midnight local.
+#[test]
+fn a_stamp_just_after_midnight_utc_keeps_its_own_date() {
+    assert_eq!(day("2026-09-15T00:14:02.000Z"), Some("2026-09-15"));
+    assert_eq!(clock("2026-09-15T00:14:02.000Z"), "00:14");
+}
+
+/// What the header is FOR: two turns an hour apart by the clock, a fortnight
+/// apart by the calendar. `14:31` twice would say nothing about the gap.
+#[test]
+fn two_turns_a_fortnight_apart_have_different_days_and_similar_clocks() {
+    let old = "2026-08-31T14:31:00.000Z";
+    let new = "2026-09-15T14:43:00.000Z";
+    assert_eq!(clock(old), "14:31");
+    assert_eq!(clock(new), "14:43");
+    assert_ne!(day(old), day(new));
 }
