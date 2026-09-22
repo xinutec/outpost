@@ -21,3 +21,15 @@ libc = "0.2"
 # row. A copy here would drift from the original silently. A pinned git
 # dependency can lag, but the lag is visible in Cargo.lock.
 reader = { git = "https://github.com/xinutec/memview.git" }
+
+# The fleet's `[lints]` baseline (dev-lint docs/standards.md §7), so clippy is
+# no weaker here than anywhere else. Extensions are argued here, per crate.
+[lints.rust]
+# `deny`, not `forbid`: main resets SIGPIPE through libc, under an
+# `#[expect(unsafe_code)]` that carries the reason at the site.
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

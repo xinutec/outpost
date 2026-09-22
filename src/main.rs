@@ -74,6 +74,10 @@ targets live in ~/.config/outpost/config.toml:
     host = \"<ssh destination>\"
     window = \"<tmux session:window>\"";
 
+#[expect(
+    unsafe_code,
+    reason = "libc::signal before any thread exists, to restore SIGPIPE's default"
+)]
 fn main() -> Result<()> {
     // ⚠ **Rust ignores SIGPIPE, and `println!` then PANICS on a closed pipe.**
     // `outpost read 50 | head` is the ordinary way to use this, and it died with
