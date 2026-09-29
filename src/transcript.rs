@@ -51,7 +51,7 @@ impl Ending {
 /// re-deriving — the one that matters most here is that a message typed while
 /// the session is working is stored as a queued `attachment` and never as a
 /// `user` row. Reading only `user` rows once produced a confident report that
-/// three of Pippijn's messages had been lost when they had all been delivered.
+/// three of the user's messages had been lost when they had all been delivered.
 pub fn conversation(bytes: &[u8]) -> Vec<Line> {
     let mut lines: Vec<Line> = human_turns(bytes)
         .into_iter()
@@ -62,7 +62,7 @@ pub fn conversation(bytes: &[u8]) -> Vec<Line> {
         .filter(|turn| !turn.text.trim_start().starts_with("<task-notification>"))
         .map(|turn| Line {
             at: turn.at,
-            who: "pippijn",
+            who: "user",
             text: turn.text,
         })
         .collect();
@@ -116,7 +116,7 @@ fn said(row: &serde_json::Value) -> Option<String> {
 /// this morning. This is what lets a reader mark where the day changed. The
 /// answer is the stamp's OWN date, in UTC as it was written: comparing against
 /// a local "today" would disagree with the printed time by a day for every
-/// message between midnight UTC and midnight local, which is the season Pippijn
+/// message between midnight UTC and midnight local, which is the season the user
 /// spends on BST.
 ///
 /// Validated to the same standard as `clock`, and for the same reason: the

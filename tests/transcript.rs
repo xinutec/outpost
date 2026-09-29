@@ -144,7 +144,7 @@ fn a_conversation_carries_both_sides() {
     );
     let lines = conversation(bytes.as_bytes());
     assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0].who, "pippijn");
+    assert_eq!(lines[0].who, "user");
     assert_eq!(lines[1].who, "session");
     assert_eq!(lines[1].text, "yes, 40 minutes in");
 }
