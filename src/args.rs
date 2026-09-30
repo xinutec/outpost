@@ -1,62 +1,96 @@
 //! Reading the command line.
 //!
-//! Pure, and in the library rather than the binary, because every bug these
-//! have had was a parse that quietly did something plausible: `-t read` looking
-//! for a target called "read" instead of running the verb, `send "x" --wait`
-//! typing the word `--wait` into the composer. Those are cheap to pin with a
-//! test and expensive to notice in use.
+//! In the library rather than the binary, because every bug this has had was a
+//! parse that quietly did something plausible: `-t read` looking for a target
+//! called "read" instead of running the verb, `send "x" --wait` typing the word
+//! `--wait` into the composer, `read --ful` ignored. clap refuses all three.
 
-use anyhow::{Context, Result, bail};
+use std::time::Duration;
 
-/// How long `wait` sits there when `--timeout` says nothing.
+use clap::{Parser, Subcommand};
+
+/// How long `wait` sits there when `--timeout` says nothing, in seconds.
 ///
 /// ⚠ **A poll costs an ssh round trip and a transcript tail**, so asking often
 /// is not free — and the thing being waited for is usually a build measured in
 /// tens of minutes. The default ceiling is generous because the alternative,
 /// returning early, reads exactly like "it never answered".
-pub const WAIT_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
+pub const WAIT_FOR_SECS: u64 = 3600;
 
-/// Lift `-t <name>` (or `--target <name>`) out of the arguments.
-pub fn take_target<'a>(args: &[&'a str]) -> Result<(Option<String>, Vec<&'a str>)> {
-    let mut target = None;
-    let mut rest = Vec::new();
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match *arg {
-            "-t" | "--target" => {
-                // ⚠ A missing value would otherwise swallow the verb: `-t read`
-                // would silently look for a target called "read".
-                let name = it.next().context("-t needs a target name")?;
-                if name.starts_with('-') {
-                    bail!("-t needs a target name, got {name:?}");
-                }
-                target = Some((*name).to_string());
-            }
-            other => rest.push(other),
-        }
-    }
-    Ok((target, rest))
+/// Talk to a Claude Code session running on another machine.
+#[derive(Parser, Debug)]
+#[command(
+    name = "outpost",
+    after_help = "Targets live in ~/.config/outpost/config.toml:
+
+    default = \"dev\"
+
+    [targets.dev]
+    host = \"<ssh destination>\"
+    window = \"<tmux session:window>\""
+)]
+pub struct Cli {
+    /// Which target, from the config file.
+    #[arg(short = 't', long = "target", global = true, value_name = "NAME")]
+    pub target: Option<String>,
+    /// What to do; `status` when absent.
+    #[command(subcommand)]
+    pub verb: Option<Verb>,
 }
-/// The value of a `--flag value` pair, if it is there.
-pub fn flag_of(args: &[&str], flag: &str) -> Result<Option<String>> {
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        if *arg == flag {
-            let value = it.next().with_context(|| format!("{flag} needs a value"))?;
-            return Ok(Some((*value).to_string()));
-        }
-    }
-    Ok(None)
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum Verb {
+    /// What the session says it is doing, and the windows.
+    Status,
+    /// The last n exchanges, both sides.
+    Read {
+        #[arg(default_value_t = 12)]
+        n: usize,
+        /// Do not shorten long messages.
+        #[arg(long)]
+        full: bool,
+    },
+    /// The window itself, with n lines of scrollback.
+    Pane {
+        #[arg(default_value_t = 0)]
+        n: usize,
+    },
+    /// Type it and press Enter, as them; `-` reads stdin.
+    Send {
+        #[arg(required = true)]
+        text: Vec<String>,
+        /// Wait for the reply and print it.
+        #[arg(long)]
+        wait: bool,
+        #[command(flatten)]
+        until: Until,
+    },
+    /// Block until it says something new, then print it.
+    Wait {
+        /// Wait until it stops working, not for what it says.
+        #[arg(long, conflicts_with = "task")]
+        idle: bool,
+        /// Wait for a background task to END, not for prose; bare waits for any.
+        #[arg(long, value_name = "TEXT", num_args = 0..=1)]
+        task: Option<Option<String>>,
+        #[command(flatten)]
+        until: Until,
+    },
 }
-/// How long to wait, from `--timeout <seconds>`.
-pub fn timeout_of(args: &[&str]) -> Result<std::time::Duration> {
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        if *arg == "--timeout" {
-            let value = it.next().context("--timeout needs a number of seconds")?;
-            let seconds: u64 = value.parse().context("--timeout wants seconds")?;
-            return Ok(std::time::Duration::from_secs(seconds));
-        }
+
+/// How long to wait, and for what.
+#[derive(clap::Args, Debug, PartialEq, Eq)]
+pub struct Until {
+    /// How long to sit there, in seconds.
+    #[arg(long, value_name = "SECONDS", default_value_t = WAIT_FOR_SECS)]
+    pub timeout: u64,
+    /// Ignore turns that do not contain it.
+    #[arg(long = "match", value_name = "TEXT")]
+    pub needle: Option<String>,
+}
+
+impl Until {
+    pub fn limit(&self) -> Duration {
+        Duration::from_secs(self.timeout)
     }
-    Ok(WAIT_FOR)
 }

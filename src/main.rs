@@ -21,8 +21,9 @@
 //! marking it as drafted. Never send unasked, and match how they actually
 //! write rather than composing fresh prose in their name.
 
-use anyhow::{Context, Result, bail};
-use outpost::args::{flag_of, take_target, timeout_of};
+use anyhow::{Result, bail};
+use clap::Parser;
+use outpost::args::{Cli, Until, Verb};
 use outpost::remote::Remote;
 use outpost::transcript::{Turn, clock, conversation, day, endings, spoken};
 use reader::transcript::human_turns;
@@ -44,35 +45,12 @@ const WIDTH: usize = 700;
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 const INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
 
-/// How often `wait` asks. The ceiling it stops at is `args::WAIT_FOR`.
+/// How often `wait` asks. The ceiling it stops at is `args::WAIT_FOR_SECS`.
 ///
 /// ⚠ **A poll costs an ssh round trip and a transcript tail**, so asking often
 /// is not free — and the thing being waited for is usually a build measured in
 /// tens of minutes.
 const WAIT_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
-
-const USAGE: &str = "usage:
-  outpost status            what the session says it is doing, and the windows
-  outpost read [n]          the last n exchanges, both sides   (default 12)
-  outpost pane [n]          the window itself, with n lines of scrollback
-  outpost send <text>       type it and press Enter, as them; `-` reads stdin
-  outpost wait              block until it says something new, then print it
-
-  -t <name>       which target, from the config file
-  --full          with `read`, do not shorten long messages
-  --wait          with `send`, wait for the reply and print it
-  --timeout <s>   with `wait`, how long to sit there (default 3600)
-  --match <text>  with `wait`, ignore turns that do not contain it
-  --task [text]   with `wait`, wait for a background task to END, not for prose
-  --idle          with `wait`, wait until it stops working, not for what it says
-
-targets live in ~/.config/outpost/config.toml:
-
-    default = \"dev\"
-
-    [targets.dev]
-    host = \"<ssh destination>\"
-    window = \"<tmux session:window>\"";
 
 #[expect(
     unsafe_code,
@@ -90,23 +68,14 @@ fn main() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let all: Vec<&str> = args.iter().map(String::as_str).collect();
-    // `-t` is pulled out before dispatch so every verb accepts it in the same
-    // place, and so a verb's own argument parsing never has to know about it.
-    let (target, rest) = take_target(&all)?;
-    let target = target.as_deref();
-    match rest.split_first() {
-        None | Some((&"status", [])) => status(target),
-        Some((&"read", tail)) => read(target, tail),
-        Some((&"pane", tail)) => pane(target, tail),
-        Some((&"send", tail)) => send(target, tail),
-        Some((&"wait", tail)) => wait(target, tail),
-        Some((&("-h" | "--help" | "help"), _)) => {
-            println!("{USAGE}");
-            Ok(())
-        }
-        Some((other, _)) => bail!("no such command {other:?}\n\n{USAGE}"),
+    let cli = Cli::parse();
+    let target = cli.target.as_deref();
+    match cli.verb.unwrap_or(Verb::Status) {
+        Verb::Status => status(target),
+        Verb::Read { n, full } => read(target, n, full),
+        Verb::Pane { n } => pane(target, n),
+        Verb::Send { text, wait, until } => send(target, &text, wait.then_some(until)),
+        Verb::Wait { idle, task, until } => self::wait(target, idle, task, until),
     }
 }
 
@@ -139,23 +108,12 @@ fn status(target: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn pane(target: Option<&str>, args: &[&str]) -> Result<()> {
-    let back: usize = match args.first() {
-        Some(n) => n.parse().context("that is not a number of lines")?,
-        None => 0,
-    };
+fn pane(target: Option<&str>, back: usize) -> Result<()> {
     print!("{}", Remote::resolve(target)?.pane(back)?);
     Ok(())
 }
 
-fn read(target: Option<&str>, args: &[&str]) -> Result<()> {
-    let full = args.contains(&"--full");
-    let want: usize = args
-        .iter()
-        .find(|arg| !arg.starts_with("--"))
-        .map_or(Ok(12), |n| n.parse())
-        .context("that is not a number of messages")?;
-
+fn read(target: Option<&str>, want: usize, full: bool) -> Result<()> {
     let far = Remote::resolve(target)?;
     let info = far.info()?;
     let bytes = far.transcript(&info.session_id)?;
@@ -191,28 +149,13 @@ fn read(target: Option<&str>, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn send(target: Option<&str>, args: &[&str]) -> Result<()> {
-    if args.is_empty() {
-        bail!("usage: outpost send <text>");
-    }
-    let text = if args == ["-"] {
+/// `then` is where to wait for the reply, when asked to.
+fn send(target: Option<&str>, words: &[String], then: Option<Until>) -> Result<()> {
+    let text = if words == ["-"] {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;
         buf
     } else {
-        // ⚠ **Flags are not message text.** Without this, `send "x" --wait`
-        // types the word "--wait" into the composer and sends it.
-        let mut words = Vec::new();
-        let mut it = args.iter();
-        while let Some(arg) = it.next() {
-            match *arg {
-                "--wait" => {}
-                "--timeout" | "--match" => {
-                    it.next();
-                }
-                other => words.push(other),
-            }
-        }
         words.join(" ")
     };
     let text = text.trim().to_string();
@@ -275,13 +218,8 @@ fn send(target: Option<&str>, args: &[&str]) -> Result<()> {
                 "read"
             };
             println!("sent, {how} ({} chars)", text.chars().count());
-            if args.contains(&"--wait") {
-                return watch(
-                    &far,
-                    &info.session_id,
-                    timeout_of(args)?,
-                    flag_of(args, "--match")?,
-                );
+            if let Some(until) = then {
+                return watch(&far, &info.session_id, until.limit(), until.needle);
             }
             return Ok(());
         }
@@ -294,23 +232,24 @@ fn send(target: Option<&str>, args: &[&str]) -> Result<()> {
     )
 }
 
-fn wait(target: Option<&str>, args: &[&str]) -> Result<()> {
+fn wait(
+    target: Option<&str>,
+    idle: bool,
+    task: Option<Option<String>>,
+    until: Until,
+) -> Result<()> {
     let far = Remote::resolve(target)?;
     let info = far.info()?;
-    let limit = timeout_of(args)?;
-    if args.contains(&"--idle") {
+    let limit = until.limit();
+    if idle {
         return watch_idle(&far, limit);
     }
-    if let Some(index) = args.iter().position(|a| *a == "--task") {
-        // The word after --task is optional: bare --task waits for ANY task to
-        // end, which is right when only one is running.
-        let want = args
-            .get(index + 1)
-            .filter(|next| !next.starts_with("--"))
-            .map(|next| (*next).to_string());
+    // Bare `--task` waits for ANY task to end, which is right when only one is
+    // running.
+    if let Some(want) = task {
         return watch_task(&far, &info.session_id, limit, want);
     }
-    watch(&far, &info.session_id, limit, flag_of(args, "--match")?)
+    watch(&far, &info.session_id, limit, until.needle)
 }
 
 /// How many consecutive idle readings count as actually idle.
