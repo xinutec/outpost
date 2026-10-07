@@ -52,8 +52,9 @@ pub struct Info {
     pub session_id: String,
     #[serde(default)]
     pub pid: u64,
-    /// `idle`, `shell`, `busy`. ⚠ `shell` means a command is running, which is
-    /// NOT the model thinking and NOT idle.
+    /// `idle`, `shell`, `busy`, `waiting`. ⚠ `shell` means a command is
+    /// running, which is NOT the model thinking and NOT idle. `waiting` means
+    /// it is blocked on a question or menu and needs an answer.
     #[serde(default)]
     pub status: String,
     #[serde(default)]
@@ -65,6 +66,26 @@ pub struct Info {
     /// Present only while Remote Control is bridged.
     #[serde(default, rename = "bridgeSessionId")]
     pub bridge: Option<String>,
+}
+
+impl Info {
+    /// Whether the session has stopped working — either it finished its turn
+    /// (`idle`) or it is blocked on a question (`waiting`).
+    ///
+    /// ⚠ **Both are "not working", and a waiter that knew only `idle` sat
+    /// silent through a question until timeout** — the one moment an answer was
+    /// most wanted. `busy` and `shell` are the working states; everything else
+    /// observed so far is a stop.
+    pub fn stopped(&self) -> bool {
+        matches!(self.status.as_str(), "idle" | "waiting")
+    }
+
+    /// Whether it stopped because it is asking something, rather than because
+    /// it finished. The two call for different next moves, so the caller is told
+    /// which.
+    pub fn waiting(&self) -> bool {
+        self.status == "waiting"
+    }
 }
 
 impl Remote {

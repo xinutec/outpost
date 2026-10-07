@@ -67,7 +67,7 @@ pub enum Verb {
     },
     /// Block until it says something new, then print it.
     Wait {
-        /// Wait until it stops working, not for what it says.
+        /// Wait until it stops working — finished, or asking a question.
         #[arg(long, conflicts_with = "task")]
         idle: bool,
         /// Wait for a background task to END, not for prose; bare waits for any.

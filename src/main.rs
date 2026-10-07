@@ -260,27 +260,38 @@ fn wait(
 /// cost 15 seconds and remove it.
 const SETTLED: usize = 2;
 
-/// Block until the session stops working.
+/// Block until the session stops working — whether it finished or is asking.
 ///
 /// The CLI writes its own `status`, which is a first-party signal and better
 /// than anything inferrable from outside — the usual alternative is guessing
 /// from a transcript that stopped growing, which is also what a wedged session
 /// looks like. ⚠ `shell` is NOT idle: it means a command is running, and a long
 /// build sits there for half an hour.
+///
+/// ⚠ **`waiting` ends the wait too, and the printed line says which stop it
+/// was.** The session reports `waiting` while blocked on a question or menu;
+/// treating only `idle` as done left this sitting silent through a question
+/// until the timeout, which is the one moment an answer was most needed.
+/// "It finished" and "it is asking you something" call for different next
+/// moves, so they are not collapsed into one word.
 fn watch_idle(far: &Remote, limit: std::time::Duration) -> Result<()> {
     let deadline = std::time::Instant::now() + limit;
     let mut settled = 0;
     let mut last = String::new();
     while std::time::Instant::now() < deadline {
         let info = far.info()?;
-        if info.status == "idle" {
+        if info.stopped() {
             settled += 1;
             if settled >= SETTLED {
-                println!("idle");
+                if info.waiting() {
+                    println!("waiting — it is asking something; `outpost pane` to see");
+                } else {
+                    println!("idle");
+                }
                 return Ok(());
             }
         } else {
-            // Any non-idle reading restarts the count, so a flicker to idle in
+            // Any working reading restarts the count, so a flicker to a stop in
             // the middle of a turn cannot accumulate towards a false result.
             settled = 0;
         }
