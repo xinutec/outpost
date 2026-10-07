@@ -6,8 +6,10 @@
 //!     outpost send "yes, retry"
 //!     echo "..." | outpost send -
 //!
-//! Where it points comes from `OUTPOST_HOST` and `OUTPOST_WINDOW`; nothing
-//! about any particular machine is written down here.
+//! The host comes from the config file or `OUTPOST_HOST`; nothing about any
+//! particular machine is written down here. The window is not configured — a
+//! session records its own tmux pane, so with one session running `outpost`
+//! finds it, and with more than one you name the window (`-t security`).
 //!
 //! **This is deliberately the whole interface.** Driving a remote container by
 //! hand means an ssh session with everything in it — the process table, the
@@ -24,7 +26,7 @@
 use anyhow::{Result, bail};
 use clap::Parser;
 use outpost::args::{Cli, Until, Verb};
-use outpost::remote::Remote;
+use outpost::remote::{Info, Remote, choose};
 use outpost::transcript::{Turn, clock, conversation, day, endings, spoken};
 use reader::transcript::human_turns;
 use std::collections::HashSet;
@@ -81,19 +83,32 @@ fn main() -> Result<()> {
 
 fn status(target: Option<&str>) -> Result<()> {
     let far = Remote::resolve(target)?;
-    let info = far.info()?;
-    let bridged = match &info.bridge {
-        Some(_) => "bridged",
-        None => "not bridged",
+    let sessions = far.sessions()?;
+    // ⚠ **With more than one session, status is where you SEE them** — so with
+    // no name it lists every running session rather than refusing to choose, and
+    // with a name it shows just that one. This is the surface `choose`'s error
+    // tells you to come to.
+    let shown: Vec<&Info> = match target {
+        Some(_) => vec![choose(&sessions, target)?],
+        None if sessions.is_empty() => {
+            bail!("no running session on the far side — is Claude running?")
+        }
+        None => sessions.iter().collect(),
     };
-    println!(
-        "{} — {} — claude {} — pid {} — {bridged}",
-        info.name.as_deref().unwrap_or("(unnamed)"),
-        info.status,
-        info.version,
-        info.pid,
-    );
-    println!("{}", info.session_id);
+    for info in shown {
+        let bridged = match &info.bridge {
+            Some(_) => "bridged",
+            None => "not bridged",
+        };
+        println!(
+            "{} — {} — claude {} — pid {} — {bridged}",
+            info.label(),
+            info.status,
+            info.version,
+            info.pid,
+        );
+        println!("  {}", info.session_id);
+    }
     // The windows are the other half of "is it all still up": a session that is
     // idle because the bots died is not the same as a session that is idle.
     match far.windows() {
@@ -109,13 +124,24 @@ fn status(target: Option<&str>) -> Result<()> {
 }
 
 fn pane(target: Option<&str>, back: usize) -> Result<()> {
-    print!("{}", Remote::resolve(target)?.pane(back)?);
+    let far = Remote::resolve(target)?;
+    // A config target names a plain window (a bot's log, the build shell); those
+    // have no session, so read the window directly. Anything else is a session's
+    // window name, so find the session and read its own pane.
+    if let Some(window) = outpost::config::window_target(target)? {
+        print!("{}", far.pane(&window, back)?);
+        return Ok(());
+    }
+    let sessions = far.sessions()?;
+    let info = choose(&sessions, target)?;
+    print!("{}", far.pane(info.target()?, back)?);
     Ok(())
 }
 
 fn read(target: Option<&str>, want: usize, full: bool) -> Result<()> {
     let far = Remote::resolve(target)?;
-    let info = far.info()?;
+    let sessions = far.sessions()?;
+    let info = choose(&sessions, target)?;
     let bytes = far.transcript(&info.session_id)?;
     let lines = conversation(&bytes);
 
@@ -174,17 +200,19 @@ fn send(target: Option<&str>, words: &[String], then: Option<Until>) -> Result<(
     }
 
     let far = Remote::resolve(target)?;
-    let info = far.info()?;
+    let sessions = far.sessions()?;
+    let info = choose(&sessions, target)?;
+    let pane = info.target()?;
     let before: HashSet<String> = human_turns(&far.transcript(&info.session_id)?)
         .into_iter()
         .map(|turn| turn.uuid)
         .collect();
 
-    far.type_text(&text)?;
+    far.type_text(pane, &text)?;
     // Look before pressing Enter. If the keystrokes went to another window, or
     // the composer was not focused, this is the last moment at which nothing has
     // been sent yet.
-    let composer = far.pane(0)?;
+    let composer = far.pane(pane, 0)?;
     // ⚠ **A composer WRAPS.** Anything past the pane width comes back with a
     // newline and the continuation's indentation inserted mid-sentence, so a
     // literal `contains` fails on exactly the long messages most worth checking
@@ -199,7 +227,7 @@ fn send(target: Option<&str>, words: &[String], then: Option<Until>) -> Result<(
              the window may not be the composer. `outpost pane` to look."
         );
     }
-    far.press_enter()?;
+    far.press_enter(pane)?;
 
     // ⚠ **The receipt is the CLI recording the turn, not tmux accepting the
     // keys.** Reporting a send the moment the bytes leave is the defect the
@@ -239,10 +267,11 @@ fn wait(
     until: Until,
 ) -> Result<()> {
     let far = Remote::resolve(target)?;
-    let info = far.info()?;
+    let sessions = far.sessions()?;
+    let info = choose(&sessions, target)?;
     let limit = until.limit();
     if idle {
-        return watch_idle(&far, limit);
+        return watch_idle(&far, info.pid, limit);
     }
     // Bare `--task` waits for ANY task to end, which is right when only one is
     // running.
@@ -274,12 +303,16 @@ const SETTLED: usize = 2;
 /// until the timeout, which is the one moment an answer was most needed.
 /// "It finished" and "it is asking you something" call for different next
 /// moves, so they are not collapsed into one word.
-fn watch_idle(far: &Remote, limit: std::time::Duration) -> Result<()> {
+fn watch_idle(far: &Remote, pid: u64, limit: std::time::Duration) -> Result<()> {
     let deadline = std::time::Instant::now() + limit;
     let mut settled = 0;
     let mut last = String::new();
     while std::time::Instant::now() < deadline {
-        let info = far.info()?;
+        // By pid, so this watches THE session chosen, not whichever is newest —
+        // with two Claudes up, the newest flips between them. If the file
+        // vanishes, `status_of` errors, which is the right answer: the session
+        // this was waiting on is gone.
+        let info = far.status_of(pid)?;
         if info.stopped() {
             settled += 1;
             if settled >= SETTLED {

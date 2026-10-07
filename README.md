@@ -24,18 +24,26 @@ for a reply about a particular thing, `--idle` for the session to stop working,
 and `--task` for a background job to *end* — which reads the harness's own
 status and exits non-zero on a job that was killed rather than finished.
 
-Point it at a session with `~/.config/outpost/config.toml`:
+With one Claude session on the host, `outpost` finds it. With more than one, you
+name the window it runs in — `-t security` — and `outpost status` lists them. A
+session records its own tmux pane, so the window is never configured; it is read
+off the session.
 
-    default = "dev"
+What the config holds is the host, and any plain windows you want to read with
+`pane` that are not sessions (a bot's log, a build shell), in
+`~/.config/outpost/config.toml`:
 
-    [targets.dev]
-    host = "<ssh destination>"      # a `Host` block in ~/.ssh/config
-    window = "<tmux session:window>"
+    default = "host"
 
-Then `-t <name>` picks a target and the `default` is used when nothing does.
-`OUTPOST_HOST` and `OUTPOST_WINDOW` work instead of a file. Nothing has a
-default, and the config lives outside the repository, so the tool carries no
-record of which machines exist.
+    [targets.host]
+    host = "<ssh destination>"   # a `Host` block in ~/.ssh/config
+
+    [targets.build]
+    host = "<ssh destination>"
+    window = "<a tmux window to read with `pane`>"
+
+`OUTPOST_HOST` works instead of a file for the host. The config lives outside the
+repository, so the tool carries no record of which machines exist.
 
 ## Two things it is careful about
 

@@ -21,16 +21,21 @@ pub const WAIT_FOR_SECS: u64 = 3600;
 #[derive(Parser, Debug)]
 #[command(
     name = "outpost",
-    after_help = "Targets live in ~/.config/outpost/config.toml:
+    after_help = "With one session running, outpost finds it. With more than one,
+name the window it is in: -t <window>. `status` lists them.
 
-    default = \"dev\"
+The host (and any non-session windows, like a bot's log) live in
+~/.config/outpost/config.toml:
 
-    [targets.dev]
+    default = \"host\"
+
+    [targets.host]
     host = \"<ssh destination>\"
-    window = \"<tmux session:window>\""
+    window = \"<a tmux window to read with `pane`>\""
 )]
 pub struct Cli {
-    /// Which target, from the config file.
+    /// Which session, by the name of the tmux window it is in; or a config
+    /// target for a non-session pane. Omit when only one session is running.
     #[arg(short = 't', long = "target", global = true, value_name = "NAME")]
     pub target: Option<String>,
     /// What to do; `status` when absent.

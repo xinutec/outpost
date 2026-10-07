@@ -19,22 +19,18 @@ use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// Where a session is, and how to address the window it lives in.
+/// How to reach a machine. The *window* a session lives in is no longer part
+/// of this: a session names its own tmux pane in its state file, so it is read
+/// off [`Info`] rather than configured here.
 ///
-/// ⚠ **Both come from the environment and neither has a default.** A host name
-/// compiled in would make this tool a record of which machines exist, which is
-/// not its job and not something a repository should carry.
+/// ⚠ **The host has no default and is never compiled in.** A host name baked
+/// into a public binary would make it a record of which machines exist, which
+/// is not its job.
 pub struct Remote {
     /// An ssh destination. A `Host` block in `~/.ssh/config`, never a bare
     /// address: the port and the login live there and are not this tool's to
     /// know.
     pub host: String,
-    /// A tmux target, `session:window`.
-    ///
-    /// ⚠ **By NAME, not by index.** Window numbers are a human habit and get
-    /// rearranged; a name survives that, as long as `allow-rename off` stops a
-    /// shell taking the name away.
-    pub target: String,
 }
 
 /// How much of a transcript's tail to read. A live one reaches gigabytes; this
@@ -46,12 +42,24 @@ const TAIL: u64 = 8 << 20;
 /// A first-party liveness signal, which is worth preferring: the usual
 /// alternative is inferring busy-ness from a running process and a growing
 /// transcript, and the CLI writes its own `status` down.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone, Debug)]
 pub struct Info {
     #[serde(rename = "sessionId")]
     pub session_id: String,
     #[serde(default)]
     pub pid: u64,
+    /// The tmux pane this session runs in, as the CLI records it:
+    /// `session:@window.%pane`. ⚠ **This is how a session is located**, so two
+    /// Claudes in one tmux server never have to be told apart by guesswork — each
+    /// says where it is. Empty when the session is not under tmux.
+    #[serde(default)]
+    pub tmux: String,
+    /// The tmux window's *name*, filled in after reading the file by matching
+    /// the window id in `tmux` against the live window list. Not in the state
+    /// file. This is what a person selects on (`-t security`), because it is the
+    /// tab they named, not the session's internal id.
+    #[serde(skip)]
+    pub window: Option<String>,
     /// `idle`, `shell`, `busy`, `waiting`. ⚠ `shell` means a command is
     /// running, which is NOT the model thinking and NOT idle. `waiting` means
     /// it is blocked on a question or menu and needs an answer.
@@ -69,6 +77,38 @@ pub struct Info {
 }
 
 impl Info {
+    /// The tmux window id out of `tmux` (`tox:@2.%2` -> `@2`), used to look the
+    /// window's name up in the live list.
+    pub fn window_id(&self) -> Option<&str> {
+        let after = self.tmux.split_once(':')?.1;
+        Some(after.split_once('.').map_or(after, |(w, _)| w))
+    }
+
+    /// The tmux pane id out of `tmux` (`tox:@2.%2` -> `%2`). A pane id is unique
+    /// across the whole tmux server, so it addresses this session's pane with no
+    /// window name in the way — which matters because the window gets renamed.
+    pub fn pane(&self) -> Option<&str> {
+        self.tmux
+            .rsplit_once('.')
+            .map(|(_, pane)| pane)
+            .filter(|pane| pane.starts_with('%'))
+    }
+
+    /// The tmux target to type into or capture, or an error naming the session
+    /// that is not in tmux rather than letting a later `send-keys` fail obscurely.
+    pub fn target(&self) -> Result<&str> {
+        self.pane()
+            .context("this session is not attached to a tmux pane")
+    }
+
+    /// What to call this session in a list or a prompt: the window name it is in,
+    /// or a short session id when it has no window name yet.
+    pub fn label(&self) -> String {
+        self.window
+            .clone()
+            .unwrap_or_else(|| self.session_id.chars().take(8).collect())
+    }
+
     /// Whether the session has stopped working — either it finished its turn
     /// (`idle`) or it is blocked on a question (`waiting`).
     ///
@@ -89,10 +129,13 @@ impl Info {
 }
 
 impl Remote {
-    /// From the config file, or the environment. See [`crate::config`].
-    pub fn resolve(named: Option<&str>) -> Result<Self> {
-        let (host, target) = crate::config::resolve(named)?;
-        Ok(Self { host, target })
+    /// The host for this invocation, from the config file or the environment.
+    /// See [`crate::config`]. The window is no longer resolved here — a session
+    /// says where it is.
+    pub fn resolve(selector: Option<&str>) -> Result<Self> {
+        Ok(Self {
+            host: crate::config::host(selector)?,
+        })
     }
 
     /// Run a shell snippet on the far side and return its stdout.
@@ -153,41 +196,70 @@ impl Remote {
     /// `hardcopy` to a file on the far side and a second command to read it
     /// back, and could only ever return the visible window — anything that
     /// scrolled past between two polls was gone.
-    pub fn pane(&self, back: usize) -> Result<String> {
+    pub fn pane(&self, target: &str, back: usize) -> Result<String> {
         self.run(
-            &format!("tmux capture-pane -p -S -{back} -t {} 2>&1", self.target),
+            &format!("tmux capture-pane -p -S -{back} -t {target} 2>&1"),
             None,
         )
     }
 
-    /// What the CLI says about itself.
+    /// Every Claude session that is actually RUNNING on the host, each with the
+    /// name of the tmux window it lives in.
     ///
-    /// ⚠ **The file is named by PID, so its name changes on every restart** and
-    /// stale siblings accumulate. The newest wins rather than the only one.
-    pub fn info(&self) -> Result<Info> {
-        // ⚠ **`cat` alone is wrong here.** These files are written without a
-        // trailing newline, so two of them concatenate into a single line that
-        // parses as nothing — and the loop below skips what it cannot parse, so
-        // the failure arrives as "no session registered" rather than as an
-        // error. Measured: a restart leaves the previous pid's file behind, so
-        // having two is the normal case, not the edge case.
+    /// ⚠ **Liveness is checked, not assumed.** The state files are named by pid
+    /// and a dead one is left behind on every restart, so an earlier version
+    /// that picked "the newest file" could pick a corpse. `kill -0 <pid>` is the
+    /// test; the pid is the filename, so no JSON parsing is needed to apply it.
+    ///
+    /// ⚠ **One round trip, two answers.** The window names come from the same
+    /// ssh call as the session files, past a marker line, because a second call
+    /// to resolve them would double the cost of every `wait` poll.
+    pub fn sessions(&self) -> Result<Vec<Info>> {
         let raw = self.run(
-            "for f in ~/.claude/sessions/*.json; do cat \"$f\"; echo; done 2>/dev/null || true",
+            r#"for f in ~/.claude/sessions/*.json; do
+                 [ -f "$f" ] || continue
+                 pid=${f##*/}; pid=${pid%.json}
+                 case "$pid" in ''|*[!0-9]*) continue;; esac
+                 kill -0 "$pid" 2>/dev/null && { cat "$f"; echo; }
+               done 2>/dev/null
+               echo "@@@WINDOWS@@@"
+               tmux list-windows -a -F '#{window_id} #{window_name}' 2>/dev/null || true"#,
             None,
         )?;
-        let mut best: Option<Info> = None;
-        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-            let Ok(info) = serde_json::from_str::<Info>(line) else {
+        let (files, windows) = raw
+            .split_once("@@@WINDOWS@@@")
+            .unwrap_or((raw.as_str(), ""));
+        let names: std::collections::HashMap<&str, &str> = windows
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .collect();
+        let mut out = Vec::new();
+        for line in files.lines().filter(|line| !line.trim().is_empty()) {
+            let Ok(mut info) = serde_json::from_str::<Info>(line) else {
                 continue;
             };
-            if best
-                .as_ref()
-                .is_none_or(|old| info.updated_at > old.updated_at)
-            {
-                best = Some(info);
-            }
+            info.window = info
+                .window_id()
+                .and_then(|id| names.get(id))
+                .map(|name| (*name).to_string());
+            out.push(info);
         }
-        best.context("no session registered on the far side — is Claude running?")
+        Ok(out)
+    }
+
+    /// The current state of one session, by pid, re-read for a poll.
+    ///
+    /// ⚠ **A vanished file is a real event, not an error to swallow:** the
+    /// session exited or was respawned under a new pid. Callers waiting on it
+    /// want to be told, not to spin.
+    pub fn status_of(&self, pid: u64) -> Result<Info> {
+        let raw = self.run(
+            &format!("cat ~/.claude/sessions/{pid}.json 2>/dev/null; echo"),
+            None,
+        )?;
+        let line = raw.lines().find(|line| !line.trim().is_empty());
+        line.and_then(|line| serde_json::from_str::<Info>(line).ok())
+            .with_context(|| format!("session {pid} is no longer registered — it may have exited"))
     }
 
     /// The tail of a session's transcript, as raw jsonl.
@@ -218,17 +290,17 @@ impl Remote {
     /// survive that. It is not attempted: the text goes over stdin and the
     /// remote shell quotes it once, in `"$(cat)"`, where nothing this side wrote
     /// can change how it parses.
-    pub fn type_text(&self, text: &str) -> Result<()> {
+    pub fn type_text(&self, target: &str, text: &str) -> Result<()> {
         self.run(
-            &format!(r#"tmux send-keys -t {} -l -- "$(cat)""#, self.target),
+            &format!(r#"tmux send-keys -t {target} -l -- "$(cat)""#),
             Some(text),
         )?;
         Ok(())
     }
 
     /// Press Enter in the window.
-    pub fn press_enter(&self) -> Result<()> {
-        self.run(&format!("tmux send-keys -t {} Enter", self.target), None)?;
+    pub fn press_enter(&self, target: &str) -> Result<()> {
+        self.run(&format!("tmux send-keys -t {target} Enter"), None)?;
         Ok(())
     }
 
@@ -243,5 +315,51 @@ impl Remote {
             .filter_map(|line| line.split_once(' '))
             .map(|(name, cmd)| (name.to_string(), cmd.to_string()))
             .collect())
+    }
+}
+
+/// How the available sessions read in an error message: `: security, development`,
+/// or empty when there are none.
+fn available(sessions: &[Info]) -> String {
+    if sessions.is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = sessions.iter().map(Info::label).collect();
+    format!(": {}", names.join(", "))
+}
+
+/// Pick the session to act on.
+///
+/// ⚠ **One running session is unambiguous; more than one is not, and guessing
+/// is the bug this exists to prevent.** An earlier version read whichever state
+/// file was newest, so with two Claudes up it would flip between them mid-task.
+/// The rule instead: with a name, take the session in the window of that name;
+/// with none, take the only session there is, or refuse and list them.
+pub fn choose<'a>(sessions: &'a [Info], selector: Option<&str>) -> Result<&'a Info> {
+    match selector {
+        Some(name) => {
+            let mut hits = sessions
+                .iter()
+                .filter(|s| s.window.as_deref() == Some(name));
+            match (hits.next(), hits.next()) {
+                (Some(one), None) => Ok(one),
+                (None, _) => bail!(
+                    "no running session in a window named {name:?}{}",
+                    available(sessions)
+                ),
+                (Some(_), Some(_)) => {
+                    bail!("more than one running session is in a window named {name:?}")
+                }
+            }
+        }
+        None => match sessions {
+            [] => bail!("no running session on the far side — is Claude running?"),
+            [one] => Ok(one),
+            many => bail!(
+                "{} sessions are running{} — name one with -t <window>",
+                many.len(),
+                available(many)
+            ),
+        },
     }
 }

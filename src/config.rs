@@ -48,48 +48,44 @@ pub fn load() -> Result<Config> {
     toml::from_str(&text).with_context(|| format!("reading {}", path.display()))
 }
 
-/// Which host and window this invocation is for.
+/// Which host this invocation is for.
 ///
-/// Order: an explicit `-t` name, then the config's `default`, then the
-/// environment. ⚠ **The environment wins over the config's values** once a
-/// target is chosen, so a one-off can be pointed somewhere else without
-/// editing a file — but it cannot silently redirect a *named* target to a
-/// different host, because naming one is a deliberate act.
-pub fn resolve(named: Option<&str>) -> Result<(String, String)> {
+/// ⚠ **No longer resolves a window** — a session names its own tmux pane, so the
+/// window is read off the session, not the config. What is left is the host:
+/// `-t <name>` pointing at a config target uses that target's host, otherwise
+/// the `default` target's host, otherwise `OUTPOST_HOST`. A selector that names
+/// no config target is NOT an error here — it is almost always a session's
+/// window name, which the caller resolves against the live sessions.
+pub fn host(selector: Option<&str>) -> Result<String> {
     let config = load()?;
-    let chosen = named.or(config.default.as_deref());
-
-    if let Some(name) = chosen {
-        let target = config.targets.get(name).with_context(|| {
-            let known: Vec<&str> = config.targets.keys().map(String::as_str).collect();
-            if known.is_empty() {
-                format!(
-                    "no target {name:?}, and {} has none",
-                    path().map(|p| p.display().to_string()).unwrap_or_default()
-                )
-            } else {
-                format!("no target {name:?}. there is: {}", known.join(", "))
-            }
-        })?;
-        return Ok((target.host.clone(), target.window.clone()));
+    if let Some(name) = selector
+        && let Some(target) = config.targets.get(name)
+    {
+        return Ok(target.host.clone());
     }
-
-    let host = std::env::var("OUTPOST_HOST")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
-    let window = std::env::var("OUTPOST_WINDOW")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
-    match (host, window) {
-        (Some(host), Some(window)) => Ok((host, window)),
-        _ => bail!(
-            "nothing to point at. write {}:\n\n\
-             \x20   default = \"dev\"\n\n\
-             \x20   [targets.dev]\n\
-             \x20   host = \"<ssh destination>\"\n\
-             \x20   window = \"<tmux session:window>\"\n\n\
-             or set OUTPOST_HOST and OUTPOST_WINDOW.",
-            path().map(|p| p.display().to_string()).unwrap_or_default()
-        ),
+    if let Some(default) = config.default.as_deref()
+        && let Some(target) = config.targets.get(default)
+    {
+        return Ok(target.host.clone());
     }
+    if let Ok(host) = std::env::var("OUTPOST_HOST")
+        && !host.trim().is_empty()
+    {
+        return Ok(host);
+    }
+    bail!(
+        "no host to reach. write {} with a default target, or set OUTPOST_HOST.",
+        path().map(|p| p.display().to_string()).unwrap_or_default()
+    )
+}
+
+/// A plain tmux window a config target points at — for panes that are NOT a
+/// Claude session, like a bot's log or the build shell. `None` when the selector
+/// names no config target (then it is a session's window name instead).
+pub fn window_target(selector: Option<&str>) -> Result<Option<String>> {
+    let Some(name) = selector else {
+        return Ok(None);
+    };
+    let config = load()?;
+    Ok(config.targets.get(name).map(|t| t.window.clone()))
 }
