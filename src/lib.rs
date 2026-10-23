@@ -11,6 +11,7 @@
 //! [`transcript::endings`], whose whole job is to tell a killed background task
 //! from a completed one, on rows nothing here controls the format of.
 pub mod args;
+pub mod composer;
 pub mod config;
 pub mod remote;
 pub mod transcript;

@@ -208,20 +208,13 @@ fn send(target: Option<&str>, words: &[String], then: Option<Until>) -> Result<(
         .map(|turn| turn.uuid)
         .collect();
 
+    let earlier = far.pane(pane, 0)?;
     far.type_text(pane, &text)?;
     // Look before pressing Enter. If the keystrokes went to another window, or
     // the composer was not focused, this is the last moment at which nothing has
-    // been sent yet.
+    // been sent yet. The transcript check below still confirms the exact text.
     let composer = far.pane(pane, 0)?;
-    // ⚠ **A composer WRAPS.** Anything past the pane width comes back with a
-    // newline and the continuation's indentation inserted mid-sentence, so a
-    // literal `contains` fails on exactly the long messages most worth checking
-    // — and the failure looks like "the keystrokes went somewhere else", which
-    // is the one thing this check exists to catch. Comparing with all
-    // whitespace removed is indifferent to where the wrap landed.
-    let squeeze =
-        |value: &str| -> String { value.chars().filter(|c| !c.is_whitespace()).collect() };
-    if !squeeze(&composer).contains(&squeeze(&text)) {
+    if !outpost::composer::shows_typed(&earlier, &composer, &text) {
         bail!(
             "typed it, but it is not on screen — not pressing Enter.\n\
              the window may not be the composer. `outpost pane` to look."
