@@ -77,7 +77,12 @@ fn main() -> Result<()> {
         Verb::Read { n, full } => read(target, n, full),
         Verb::Pane { n } => pane(target, n),
         Verb::Send { text, wait, until } => send(target, &text, wait.then_some(until)),
-        Verb::Wait { idle, task, until } => self::wait(target, idle, task, until),
+        Verb::Wait {
+            idle,
+            shells,
+            task,
+            until,
+        } => self::wait(target, idle.then_some(shells), task, until),
     }
 }
 
@@ -255,7 +260,7 @@ fn send(target: Option<&str>, words: &[String], then: Option<Until>) -> Result<(
 
 fn wait(
     target: Option<&str>,
-    idle: bool,
+    idle: Option<usize>,
     task: Option<Option<String>>,
     until: Until,
 ) -> Result<()> {
@@ -263,8 +268,8 @@ fn wait(
     let sessions = far.sessions()?;
     let info = choose(&sessions, target)?;
     let limit = until.limit();
-    if idle {
-        return watch_idle(&far, info.pid, limit);
+    if let Some(shells) = idle {
+        return watch_idle(&far, info.pid, shells, limit);
     }
     // Bare `--task` waits for ANY task to end, which is right when only one is
     // running.
@@ -296,7 +301,12 @@ const SETTLED: usize = 2;
 /// until the timeout, which is the one moment an answer was most needed.
 /// "It finished" and "it is asking you something" call for different next
 /// moves, so they are not collapsed into one word.
-fn watch_idle(far: &Remote, pid: u64, limit: std::time::Duration) -> Result<()> {
+///
+/// ⚠ **`shell` also covers a FINISHED turn that left shells in the
+/// background**, which may never end. With `shells`, such a turn counts as
+/// stopped while the footer counts at most that many; the window decides,
+/// since the state file can't tell it from a foreground command.
+fn watch_idle(far: &Remote, pid: u64, shells: usize, limit: std::time::Duration) -> Result<()> {
     let deadline = std::time::Instant::now() + limit;
     let mut settled = 0;
     let mut last = String::new();
@@ -306,11 +316,20 @@ fn watch_idle(far: &Remote, pid: u64, limit: std::time::Duration) -> Result<()> 
         // vanishes, `status_of` errors, which is the right answer: the session
         // this was waiting on is gone.
         let info = far.status_of(pid)?;
-        if info.stopped() {
+        let background = if info.status == "shell" && shells > 0 {
+            let screen = far.pane(info.target()?, 0)?;
+            let running = outpost::footer::background_shells(&screen);
+            (outpost::footer::turn_done(&screen) && running <= shells).then_some(running)
+        } else {
+            None
+        };
+        if info.stopped() || background.is_some() {
             settled += 1;
             if settled >= SETTLED {
                 if info.waiting() {
                     println!("waiting — it is asking something; `outpost pane` to see");
+                } else if let Some(running) = background {
+                    println!("idle ({running} background shells running)");
                 } else {
                     println!("idle");
                 }

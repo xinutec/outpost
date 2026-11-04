@@ -75,6 +75,10 @@ pub enum Verb {
         /// Wait until it stops working — finished, or asking a question.
         #[arg(long, conflicts_with = "task")]
         idle: bool,
+        /// With --idle: a finished turn still counts as idle while at most this
+        /// many background shells run.
+        #[arg(long, value_name = "N", default_value_t = 0, requires = "idle")]
+        shells: usize,
         /// Wait for a background task to END, not for prose; bare waits for any.
         #[arg(long, value_name = "TEXT", num_args = 0..=1)]
         task: Option<Option<String>>,
