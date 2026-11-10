@@ -46,6 +46,9 @@ const WIDTH: usize = 700;
 /// first few seconds.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 const INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
+/// How often, and how far apart, `send` looks for what it typed before Enter.
+const SHOW_TRIES: usize = 8;
+const SHOW_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// How often `wait` asks. The ceiling it stops at is `args::WAIT_FOR_SECS`.
 ///
@@ -218,8 +221,14 @@ fn send(target: Option<&str>, words: &[String], then: Option<Until>) -> Result<(
     // Look before pressing Enter. If the keystrokes went to another window, or
     // the composer was not focused, this is the last moment at which nothing has
     // been sent yet. The transcript check below still confirms the exact text.
-    let composer = far.pane(pane, 0)?;
-    if !outpost::composer::shows_typed(&earlier, &composer, &text) {
+    let shown = outpost::composer::appears(
+        || far.pane(pane, 0),
+        &earlier,
+        &text,
+        SHOW_TRIES,
+        SHOW_PAUSE,
+    )?;
+    if !shown {
         bail!(
             "typed it, but it is not on screen — not pressing Enter.\n\
              the window may not be the composer. `outpost pane` to look."

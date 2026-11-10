@@ -51,3 +51,29 @@ fn a_placeholder_in_a_different_window_shape_does_not() {
     let after = "Pasted text #18 is mentioned here";
     assert!(!shows_typed("❯ \n", after, MSG));
 }
+
+// ⚠ **The composer redraws on its own schedule.** One capture right after typing
+// can predate the redraw of a long message, and `send` would refuse to press
+// Enter with the text sitting in the box.
+
+use outpost::composer::appears;
+use std::time::Duration;
+
+#[test]
+fn text_that_shows_on_a_later_look_counts() {
+    let mut looks = vec!["❯ \n".to_string(), "❯ \n".to_string(), format!("❯ {MSG}\n")].into_iter();
+    let shown = appears(
+        || Ok(looks.next().unwrap_or_default()),
+        "❯ \n",
+        MSG,
+        5,
+        Duration::ZERO,
+    );
+    assert!(shown.unwrap());
+}
+
+#[test]
+fn text_that_never_shows_does_not() {
+    let shown = appears(|| Ok("❯ \n".to_string()), "❯ \n", MSG, 5, Duration::ZERO);
+    assert!(!shown.unwrap());
+}
