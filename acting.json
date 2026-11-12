@@ -1,0 +1,16 @@
+{
+  "ceilings": {
+    "acts": 0,
+    "bootstrap": 0,
+    "by_design": 0,
+    "observer_checks": 0,
+    "observes": 0
+  },
+  "subjects": [
+    {
+      "class": "OutOfScope",
+      "path": "scripts/setup-hooks.sh",
+      "why": ""
+    }
+  ]
+}

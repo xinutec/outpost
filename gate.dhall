@@ -76,4 +76,5 @@ in  { name = "outpost"
       , G.devLint "../"
       , G.checkTable "../dev-lint"
       ]
+      # G.acting "../dev-lint"
     }
