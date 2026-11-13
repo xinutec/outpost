@@ -15,7 +15,7 @@
 //! hand means an ssh session with everything in it — the process table, the
 //! caches, the logs — and the standing instruction is to talk to the session
 //! rather than go and look. An instruction like that rests on restraint for
-//! exactly as long as the blunt instrument is still in reach. Four verbs that
+//! exactly as long as the blunt instrument is still in reach. A few verbs that
 //! read a conversation and type into a composer are the whole job, so they are
 //! the whole tool.
 //!
@@ -80,6 +80,7 @@ fn main() -> Result<()> {
         Verb::Read { n, full } => read(target, n, full),
         Verb::Pane { n } => pane(target, n),
         Verb::Send { text, wait, until } => send(target, &text, wait.then_some(until)),
+        Verb::Login { code } => login(target, &code),
         Verb::Wait {
             idle,
             shells,
@@ -263,6 +264,67 @@ fn send(target: Option<&str>, words: &[String], then: Option<Until>) -> Result<(
         "typed and submitted, but it has not appeared in the transcript in {}s.\n\
          it may be mid-turn with a slow write, or it may have stopped reading input.\n\
          `outpost pane` to see which — do NOT send it again blind.",
+        PATIENCE.as_secs()
+    )
+}
+
+/// How far back the login screen is looked for, in lines of scrollback.
+const LOGIN_SCROLLBACK: usize = 80;
+
+/// With no code, print the sign-in link; with one, enter it and finish the login.
+///
+/// ⚠ **The code box masks what is typed**, so `send`'s check that the text is on
+/// screen cannot work here. What can be checked is that the box filled up before
+/// Enter, and that the screen then says the login succeeded.
+fn login(target: Option<&str>, words: &[String]) -> Result<()> {
+    use outpost::login::{Step, code_entered, step, url};
+    let far = Remote::resolve(target)?;
+    let sessions = far.sessions()?;
+    let info = choose(&sessions, target)?;
+    let pane = info.target()?;
+    let screen = far.pane(pane, LOGIN_SCROLLBACK)?;
+    if step(&screen) != Step::AwaitingCode {
+        bail!("that session is not at its login screen. `outpost pane` to look.");
+    }
+    if words.is_empty() {
+        let link = url(&screen).ok_or_else(|| anyhow::anyhow!("no sign-in link on its screen"))?;
+        println!("{link}");
+        return Ok(());
+    }
+    let code = if words == ["-"] {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        buf
+    } else {
+        words.join("")
+    };
+    let code = code.trim();
+    if code.is_empty() || code.contains(char::is_whitespace) {
+        bail!("a login code has no spaces and is not empty");
+    }
+    far.type_text(pane, code)?;
+    let entered = outpost::composer::appears_with(
+        || Ok(code_entered(&far.pane(pane, 0)?)),
+        SHOW_TRIES,
+        SHOW_PAUSE,
+    )?;
+    if !entered {
+        bail!("typed the code, but the box shows nothing in it — not pressing Enter.");
+    }
+    far.press_enter(pane)?;
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(INTERVAL);
+        if step(&far.pane(pane, LOGIN_SCROLLBACK)?) == Step::Done {
+            // "Press Enter to continue" closes the login screen.
+            far.press_enter(pane)?;
+            println!("logged in");
+            return Ok(());
+        }
+    }
+    bail!(
+        "submitted the code, but the screen never said the login succeeded in {}s.\n\
+         the code may have been refused or expired. `outpost pane` to look.",
         PATIENCE.as_secs()
     )
 }

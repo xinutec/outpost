@@ -102,3 +102,17 @@ fn a_misspelt_flag_or_count_is_refused() {
     assert!(parse(&["read", "lots"]).is_err());
     assert!(parse(&["wait", "--mach", "x"]).is_err());
 }
+
+#[test]
+fn login_takes_an_optional_code() {
+    assert_eq!(
+        parse(&["login"]).unwrap().verb,
+        Some(Verb::Login { code: vec![] })
+    );
+    assert_eq!(
+        parse(&["-t", "security", "login", "-"]).unwrap().verb,
+        Some(Verb::Login {
+            code: vec!["-".into()]
+        })
+    );
+}

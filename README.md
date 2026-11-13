@@ -17,6 +17,14 @@ the session's own transcript.
     outpost pane [n]          the window itself, with n lines of scrollback
     outpost send <text>       type it and press Enter; `-` reads stdin
     outpost wait              block until something happens, then say what
+    outpost login [code]      a logged-out session: print its sign-in link as one line;
+                              with the code the browser gives back, enter it and finish
+
+`login` exists because the sign-in link wraps across the window and cannot be
+copied out of `pane` by hand, and because the code box masks what is typed, so
+`send` cannot confirm it. It checks the box filled before Enter, then that the
+screen says the login succeeded. It refuses on a session that is not at its
+login screen.
 
 `wait` takes the thing to wait FOR, because "anything new" is the wrong
 question whenever somebody else is also talking to the session: `--match <text>`
@@ -54,7 +62,7 @@ pressing Enter, and then waits for the session's transcript to record the turn.
 A message typed while the session is working is queued rather than read, and it
 says so instead of claiming delivery.
 
-**It has five verbs and no escape hatch.** Driving a remote container by hand
+**It has a few verbs and no escape hatch.** Driving a remote container by hand
 means an ssh session with the process table, the caches and the logs all in
 reach. If the intent is to talk to the session rather than go and look around,
 then the tool should not be able to go and look around either.

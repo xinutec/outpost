@@ -70,6 +70,9 @@ pub enum Verb {
         #[command(flatten)]
         until: Until,
     },
+    /// A logged-out session: print its sign-in link as one line; with the code
+    /// the browser gives back (`-` reads stdin), enter it and finish the login.
+    Login { code: Vec<String> },
     /// Block until it says something new, then print it.
     Wait {
         /// Wait until it stops working — finished, or asking a question.

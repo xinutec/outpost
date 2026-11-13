@@ -42,6 +42,24 @@ pub fn appears(
     Ok(false)
 }
 
+/// Whether `check` holds within `tries` looks, `pause` apart: [`appears`] for a
+/// box whose content cannot be read back.
+pub fn appears_with(
+    mut check: impl FnMut() -> anyhow::Result<bool>,
+    tries: usize,
+    pause: Duration,
+) -> anyhow::Result<bool> {
+    for attempt in 0..tries {
+        if attempt > 0 {
+            std::thread::sleep(pause);
+        }
+        if check()? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn placeholders(screen: &str) -> HashSet<u64> {
     const OPEN: &str = "[Pasted text #";
     screen

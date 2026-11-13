@@ -77,3 +77,24 @@ fn text_that_never_shows_does_not() {
     let shown = appears(|| Ok("❯ \n".to_string()), "❯ \n", MSG, 5, Duration::ZERO);
     assert!(!shown.unwrap());
 }
+
+use outpost::composer::appears_with;
+
+#[test]
+fn a_check_that_holds_on_a_later_look_counts() {
+    let mut looks = 0;
+    let held = appears_with(
+        || {
+            looks += 1;
+            Ok(looks == 3)
+        },
+        5,
+        Duration::ZERO,
+    );
+    assert!(held.unwrap());
+}
+
+#[test]
+fn a_check_that_never_holds_does_not() {
+    assert!(!appears_with(|| Ok(false), 5, Duration::ZERO).unwrap());
+}

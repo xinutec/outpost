@@ -14,5 +14,6 @@ pub mod args;
 pub mod composer;
 pub mod config;
 pub mod footer;
+pub mod login;
 pub mod remote;
 pub mod transcript;
