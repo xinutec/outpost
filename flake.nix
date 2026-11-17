@@ -22,7 +22,7 @@
           cargoLock = {
             lockFile = ./Cargo.lock;
             outputHashes = {
-              "reader-0.1.0" = "sha256-VnBfMOH2L5TaOsABauz8gFXAHzsRNqI6eatmSj3EeZE=";
+              "reader-0.1.0" = "sha256-LzFq0lO92Rac3o0F8KgNOpn/3vDpEHFI7p1Dc24DOrw=";
             };
           };
 
